@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Smart Auditor</title>
+  <!-- Font Awesome CDN for icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" integrity="sha512-Evv84Mr4kqVGRNSgIGL/F/aIDqQb7xQ2vcrdIwxfjThSH8CSR7PBEakCr51Ck+w+/U6swU2Im1vVX0SVk9ABhg==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+  <!-- External CSS file -->
+  <link rel="stylesheet" href="styles.css" />
+  <!-- Exact-DOM export: html2pdf (bundles html2canvas + jsPDF) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js" referrerpolicy="no-referrer"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.2/dist/purify.min.js"></script>
+
+</head>
+<body>
+  
+  <!-- LOADER OVERLAY -->
+  <!--
+    The original application hid the entire page until Firebase authentication
+    completed. In this local development build we do not rely on a remote
+    auth provider, so the loader overlay has been disabled. The overlay is
+    still present in the markup but is hidden via CSS. When integrating with
+    Firebase you can restore the loader behaviour.
+  -->
+  <div id="loader" class="hidden">
+    <div class="spinner"></div>
+  </div>
+  <div id="app">
+  <!-- Hamburger Button (visible on mobile/tablet) -->
+  <button id="hamburgerBtn" class="hamburger-btn">
+    <i class="fas fa-bars"></i>
+  </button>
+
+  <div class="app-container">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <!-- Close button inside sidebar; visible on mobile/tablet -->
+      <button id="closeSidebarBtn" class="close-sidebar-btn">
+        <i class="fas fa-times"></i>
+      </button>
+      <div class="sidebar-top">
+        <h2>AI Smart Auditor</h2>
+        <nav>
+          <ul class="nav-list">
+            <li>
+              <button type="button" class="nav-btn" onclick="handleNavClick('New Chat')">
+                <i class="fas fa-comment-dots"></i>
+                New Chat
+              </button>
+            </li>
+            <li>
+              <button type="button" class="nav-btn" id="scoped-in-Btn">
+                <i class="fas fa-gear"></i>
+                Change Programme
+              </button>
+            </li>
+          </ul>
+        </nav>
+        <div class="pre-prompts">
+          <h3>Pre-Prompts</h3>
+          <ul class="pre-prompts-list">
+            <li>
+              <button type="button" id="consistencyBtn" class="pre-prompt-btn" onclick="consistency()" disabled>
+                Consistency
+              </button>
+            </li>
+            <li>
+              <button type="button" id="measurabilityBtn" class="pre-prompt-btn" onclick="measurability2()" disabled>
+                Measurability
+              </button>
+            </li>
+            <li>
+              <button type="button" id="relevanceBtn" class="pre-prompt-btn" onclick="relevance()" disabled>
+                Relevance
+              </button>
+            </li>
+            <li>
+              <button type="button" id="presentationBtn" class="pre-prompt-btn" onclick="presentation()" disabled>
+                Presentation & Disclosure
+              </button>
+            </li>
+          </ul>
+        </div>
+        <div>
+          <h3>Uploaded Files</h3>
+          <div id="uploadedFiles"></div>
+        </div>
+        
+        <!-- Process Documents Button and File List -->
+      <button class="dark-mode-toggle" id="darkModeToggle">Dark Mode</button>
+    </aside>
+
+    <!-- Main Chat Area -->
+    <main class="chat-area">
+      <header class="chat-header">
+        <div class="chat-header-left">
+          <h1>AI Smart Auditor</h1>
+        </div>
+        <div class="chat-header-right">
+          <span id="userNameDisplay" style="margin-right: 12px; font-weight: bold;"></span>
+          <button id="logOutBtn" onclick="logOut()">Log Out</button>
+        </div>
+      </header>
+      <div id="userAlerts" style="padding: 10px; display: none; text-align: center; font-weight: bold;"></div>
+      <div class="chat-content response">
+        <!-- NEW: only messages go in here, so we can clear it safely -->
+      <div id="chatContent" ></div>
+      
+      <div id="thinkingText" style="display: none; text-align: center; margin-top: 10px; font-style: italic; font-weight: bold;">
+        Thinking<span class="dots">...</span>
+      </div>
+        <div id="processingText" style="display: none; text-align: center; margin-top: 10px; font-style: italic; font-weight: bold;">
+          Processing<span class="dots">...</span>
+        </div>
+
+        <div id="loadingSpinner" style="display: none; text-align: center; margin: 20px;">
+  <i class="fas fa-spinner fa-spin" style="font-size: 2rem; color: #007bff;"></i>
+  <p id="loaderstext">Please wait while we upload & analyze your documents</p>
+</div>
+
+  <div id="loadingSpinner2" style="display: none; text-align: center; margin: 20px;">
+  <i class="fas fa-spinner fa-spin" style="font-size: 2rem; color: #007bff;"></i>
+  <p id="loaderstext">Chunking & embedding APP document</p>
+</div>
+
+  <div id="loadingSpinner4" style="display: none; text-align: center; margin: 20px;">
+  <i class="fas fa-spinner fa-spin" style="font-size: 2rem; color: #007bff;"></i>
+  <p id="loaderstext">Extracting KPIs from APP Document</p>
+</div>
+
+<div id="loadingSpinner3" style="display: none; text-align: center; margin: 20px;">
+  <i class="fas fa-spinner fa-spin" style="font-size: 2rem; color: #007bff;"></i>
+  <p id="loaderstext">Chunking & embedding APR document</p>
+</div>
+
+<div id="loadingSpinner5" style="display: none; text-align: center; margin: 20px;">
+  <i class="fas fa-spinner fa-spin" style="font-size: 2rem; color: #007bff;"></i>
+  <p id="loaderstext">Extracting KPIs from APR Document</p>
+</div>
+
+
+
+ <div id="response" style="text-align:center;"></div>
+      <div id="programmeCard" style="margin: auto; width: 500px;"></div>
+      </div>
+
+      <div class="chat-input">
+        <div class="message">
+          <input type="text" id="userInput" placeholder="Type your message..." />
+        </div>
+        <div class="btn">
+          <button id="uploadButton" class="btn btn-primary">
+            <i class="fa-solid fa-arrow-up-from-bracket"></i>
+          </button>
+          <div>
+          <input type="file" id="hiddenFileInput" name="files[]" multiple style="display: none;" />
+          <button id="sendBtn"style="display:block; cursor:pointer;">
+            <i class="fa-solid fa-arrow-up"></i>
+          </button>
+          <button id="stopBtn" style="display:none; cursor:pointer;">
+            <i class="fa-solid fa-square"></i>
+          </button>
+        </div>
+
+      </div>
+      </div>
+      <p style="text-align:center; text-wrap: text-wrap; color: gray; font-size: 0.95rem;">By using our system you agree to our licence agreement, which can be found by clicking here:</p>
+<a href="license.html" class="license-link" target="_blank">Licensing agreement</a>
+
+    </main>
+  </div>
+</div>
+  <!-- pdf.js Library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.5.141/pdf.min.js"></script>
+  
+  <!-- Firebase SDKs (must come first) -->
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
+
+<!-- Your Firebase config and initialization -->
+  <script>
+    // Your web app's Firebase configuration
+    // NOTE: Firebase is still initialised so that Firestore SDK objects exist;
+    // however, in this local build we do not enforce authentication. If you
+    // deploy this app with Firebase auth enabled, leave these settings in
+    // place and restore the onAuthStateChanged handler below.
+    const firebaseConfig = {
+      apiKey: "AIzaSyDp-vXoXe1TkWyOpIUChcFhv4GyKereiss",
+      authDomain: "smart-ai-auditor.firebaseapp.com",
+      projectId: "smart-ai-auditor",
+      storageBucket: "smart-ai-auditor.firebasestorage.app",
+      messagingSenderId: "705497984176",
+      appId: "1:705497984176:web:a96f634b2e114ef09f1f75",
+      measurementId: "G-8E58XW934C"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db   = firebase.firestore();
+    const auth = firebase.auth();
+
+    // In the absence of a Firebase-authenticated user we fall back to a
+    // default guest identifier. This allows the application to run
+    // locally without login and ensures state is namespaced per user.
+    const existingUID = localStorage.getItem('currentUserUID');
+    if (!existingUID) {
+      localStorage.setItem('currentUserUID', 'guest');
+      window.currentUserUID = 'guest';
+    } else {
+      window.currentUserUID = existingUID;
+    }
+
+    // Reveal the app immediately since we are not waiting on auth state.
+    document.documentElement.style.visibility = '';
+    const loader = document.getElementById('loader');
+    const appEl  = document.getElementById('app');
+    loader?.classList?.add('hidden');
+    appEl?.classList?.add('visible');
+
+    // Optional: if you later enable Firebase auth, uncomment the block below
+    // to restore the redirect behaviour. By default we skip it to allow
+    // local usage.
+    // auth.onAuthStateChanged(user => {
+    //   if (user) {
+    //     window.currentUserUID = user.uid;
+    //     loader.classList.add('hidden');
+    //     loader.addEventListener('transitionend', () => {
+    //       appEl.classList.add('visible');
+    //     }, { once: true });
+    //   } else {
+    //     loader.classList.add('hidden');
+    //     loader.addEventListener('transitionend', () => {
+    //       window.location.replace('index.html');
+    //     }, { once: true });
+    //   }
+    // });
+  </script>
+
+  
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.2/mammoth.browser.min.js"></script>
+
+  <!-- PDF Export functionality -->
+  <script src="pdf-export.js"></script>
+
+  <!-- Your script -->
+  <script src="script.js"></script>
+
+</body>
+</html>

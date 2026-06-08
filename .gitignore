@@ -1,0 +1,12 @@
+.env
+server/.env
+node_modules/
+server/node_modules/
+__pycache__/
+python/__pycache__/
+*.pyc
+*.pdf
+*.zip
+server/tmp/
+server/stderr.log
+temp/

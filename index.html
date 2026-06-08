@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Smart Auditor Login</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #001c48;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            flex-direction: column;
+            position: relative;
+        }
+        
+        .header-container {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .header-container img {
+            height: 40px;
+        }
+        
+        .header-container .header-text {
+            color: white;
+            font-size: 18px;
+            font-weight: bold;
+        }
+        
+        .login-container,
+        .reset-container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            width: 300px;
+            position: relative;
+        }
+        
+        .login-container h2,
+        .reset-container h2 {
+            text-align: center;
+            margin:7px;
+        }
+        
+        .input-wrapper {
+            position: relative;
+        }
+        
+        .login-container input[type="text"],
+        .login-container input[type="password"],
+        .reset-container input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            margin: 8px 0;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        
+        .login-container button,
+        .reset-container button {
+            width: 100%;
+            padding: 10px;
+            font-weight: bold;
+            background-color: #007BFF;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        
+        .reset-container button:last-child {
+            background-color: #0056b3;
+        }
+        
+        .login-container button:hover,
+        .reset-container button:hover {
+            opacity: 0.9;
+        }
+        
+        .forgot-password {
+            text-align: right;
+            margin-top: 5px;
+        }
+        
+        .forgot-password a {
+            font-size: 12px;
+            color: #007BFF;
+            text-decoration: none;
+        }
+        
+        .forgot-password a:hover {
+            text-decoration: underline;
+        }
+        
+        .reset-container {
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .error {
+            color: red;
+            text-align: center;
+        }
+        
+        .popup-balloon {
+            display: none;
+            position: absolute;
+            top: -50px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #333;
+            color: white;
+            padding: 10px;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+            z-index: 1000;
+        }
+        
+        .toggle-password {
+            position: absolute;
+            top: 50%;
+            right: 10px;
+            transform: translateY(-50%);
+            cursor: pointer;
+            color: #007BFF;
+            font-size: 14px;
+        }
+    </style>
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
+    <script>
+       // Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyDp-vXoXe1TkWyOpIUChcFhv4GyKereiss",
+  authDomain: "smart-ai-auditor.firebaseapp.com",
+  projectId: "smart-ai-auditor",
+  storageBucket: "smart-ai-auditor.firebasestorage.app",
+  messagingSenderId: "705497984176",
+  appId: "1:705497984176:web:a96f634b2e114ef09f1f75",
+  measurementId: "G-8E58XW934C"
+};
+        firebase.initializeApp(firebaseConfig);
+
+          // 🔐 Track current user session
+      firebase.auth().onAuthStateChanged((user) => {
+  if (user) {
+    console.log("👤 Logged in as:", user.uid);
+    window.currentUserUID = user.uid;
+
+    // ✅ Save UID to localStorage
+    localStorage.setItem("currentUserUID", user.uid);
+
+    createUserProfile(user);
+  } else {
+    console.log("🔒 No user logged in");
+    window.currentUserUID = null;
+
+    // ❌ Clear stored UID
+    localStorage.removeItem("currentUserUID");
+  }
+});
+
+
+        function showReset() {
+            document.getElementById('login-container').style.display = 'none';
+            document.getElementById('reset-container').style.display = 'flex';
+        }
+
+        function hideReset() {
+            document.getElementById('reset-container').style.display = 'none';
+            document.getElementById('login-container').style.display = 'block';
+        }
+
+        function sendPasswordReset() {
+            const email = document.getElementById('reset-email').value;
+            const popupBalloon = document.getElementById('popup-balloon');
+
+            if (!email) {
+                popupBalloon.textContent = 'Please enter your email to reset password.';
+                popupBalloon.style.backgroundColor = '#f44336';
+                popupBalloon.style.display = 'block';
+                setTimeout(() => {
+                    popupBalloon.style.display = 'none';
+                }, 3000);
+                return;
+            }
+
+            // Show initial popup before sending
+            popupBalloon.textContent = 'Sending link to your email...';
+            popupBalloon.style.backgroundColor = '#007BFF';
+            popupBalloon.style.display = 'block';
+
+            firebase.auth().sendPasswordResetEmail(email)
+                .then(() => {
+                    popupBalloon.textContent = 'Reset link has been sent to your email address.';
+                    popupBalloon.style.backgroundColor = '#4CAF50';
+                    popupBalloon.style.display = 'block';
+                    setTimeout(() => {
+                        popupBalloon.style.display = 'none';
+                    }, 5000);
+                })
+                .catch((error) => {
+                    popupBalloon.textContent = error.message;
+                    popupBalloon.style.backgroundColor = '#f44336';
+                    popupBalloon.style.display = 'block';
+                    setTimeout(() => {
+                        popupBalloon.style.display = 'none';
+                    }, 3000);
+                });
+        }
+
+        function createUserProfile(user) {
+          const db = firebase.firestore();
+          const userRef = db.collection("users").doc(user.uid);
+
+          userRef.set({
+            email: user.email,
+            lastLogin: firebase.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
+        }
+
+
+        function validateLogin() {
+            const email = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const errorMsg = document.getElementById('error-msg');
+            const popupBalloon = document.getElementById('popup-balloon');
+
+            if (!email || !password) {
+                errorMsg.textContent = 'Please enter both username and password.';
+                return;
+            }
+
+            firebase.auth().signInWithEmailAndPassword(email, password)
+                .then((userCredential) => {
+                    const user = userCredential.user;
+                    createUserProfile(user); 
+                    errorMsg.textContent = '';;
+                    setTimeout(() => {
+                        popupBalloon.style.display = 'none';
+                    }, 3000);
+                    window.location.replace('home.html');
+                })
+                .catch((error) => {
+                    errorMsg.textContent = '';
+                    popupBalloon.textContent = error.message;
+                    popupBalloon.style.backgroundColor = '#f44336';
+                    popupBalloon.style.display = 'block';
+                    setTimeout(() => {
+                        popupBalloon.style.display = 'none';
+                    }, 3000);
+                });
+        }
+    </script>
+</head>
+
+<body>
+    <div class="header-container">
+        <img width="100px" height="100px" src="Nextsphere.png" alt="AGSA Logo">
+        <div class="header-text">AI Smart Auditor</div>
+    </div>
+
+    <div class="login-container" id="login-container">
+        <div style="text-align: center;">
+            <img style="margin: auto; width:80px; ;"
+         src="Nextsphere1.png" alt="Logo">
+        </div>
+        
+        <h2 style="color:#d77cf1; padding-bottom:0; padding-top: 0;">Login</h2>
+        <input type="text" id="username" placeholder="username">
+        <div class="input-wrapper">
+            <input type="password" id="password" placeholder="password">
+            <span class="toggle-password" onclick="togglePasswordVisibility()">👁️</span>
+        </div>
+        <div class="forgot-password">
+            <a href="#" onclick="showReset(); return false;">Forgot password?</a>
+        </div>
+        <button onclick="validateLogin()">Login</button>
+        <p class="error" id="error-msg"></p>
+        <div class="popup-balloon" id="popup-balloon"></div>
+    </div>
+
+    <div class="reset-container" id="reset-container">
+        <h2>Reset Password</h2>
+        <input type="text" id="reset-email" placeholder="Enter your email">
+        <button onclick="sendPasswordReset()">Send Reset Link</button>
+        <button onclick="hideReset()">Back to Login</button>
+    </div>
+
+    <script>
+        function togglePasswordVisibility() {
+            const passwordField = document.getElementById('password');
+            const toggleIcon = document.querySelector('.toggle-password');
+
+            if (passwordField.type === 'password') {
+                passwordField.type = 'text';
+                toggleIcon.textContent = '🙈';
+            } else {
+                passwordField.type = 'password';
+                toggleIcon.textContent = '👁️';
+            }
+        }
+    </script>
+</body>
+
+</html>
