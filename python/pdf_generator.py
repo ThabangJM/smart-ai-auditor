@@ -1,588 +1,917 @@
 """
-Professional Government-Style Report PDF Generator
-Generates styled PDFs with professional government/corporate formatting
-Follows departmental standards for reports and presentations
-Uses reportlab for high-quality document generation
+Modern Professional Report PDF Generator
+---------------------------------------
+Drop-in replacement for the existing ReportLab PDF generator.
+
+Key upgrades:
+- Modern cover page with branded hero panel and metadata card
+- Cleaner typography and spacing
+- Adaptive, less-dense tables with repeated headers
+- Modern indicator/assessment cards
+- Yes/No status pills
+- Refined conclusion callouts
+- Cleaner headers, footers, page numbering and document chrome
+- Markdown headings, bold, italic, code and simple lists
+
+Expected input:
+    messages = [
+        {"role": "assistant", "content": "...", "timestamp": "..."},
+        ...
+    ]
+
+Public interface is intentionally kept compatible:
+    generate_chat_pdf(messages, output_path="output.pdf")
 """
 
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch, cm
-from reportlab.lib.colors import HexColor, white, black
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether, PageTemplate, Frame
-from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER, TA_JUSTIFY
-from reportlab.pdfgen import canvas
 from datetime import datetime
+from xml.sax.saxutils import escape
 import json
-import sys
 import re
+import sys
 
+from reportlab.lib import colors
+from reportlab.lib.colors import HexColor, white
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import cm
+from reportlab.pdfgen import canvas
+from reportlab.platypus import (
+    HRFlowable,
+    KeepTogether,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
+
+# -----------------------------------------------------------------------------
+# DESIGN TOKENS - change these to rebrand the whole PDF in one place
+# -----------------------------------------------------------------------------
+NAVY = HexColor("#12304A")
+BLUE = HexColor("#2878B5")
+BLUE_DARK = HexColor("#1D5D8D")
+TEAL = HexColor("#1D8F8A")
+INK = HexColor("#18212B")
+MUTED = HexColor("#687582")
+BORDER = HexColor("#DCE4EA")
+SURFACE = HexColor("#F7F9FB")
+SURFACE_BLUE = HexColor("#EEF5FA")
+SURFACE_TEAL = HexColor("#ECF8F6")
+SUCCESS = HexColor("#1C7C54")
+SUCCESS_BG = HexColor("#EAF6F0")
+DANGER = HexColor("#B33A3A")
+DANGER_BG = HexColor("#FBECEC")
+WARNING = HexColor("#9A6817")
+WARNING_BG = HexColor("#FFF6DF")
+WHITE = white
+PAGE_W, PAGE_H = A4
+
+LEFT_MARGIN = 1.65 * cm
+RIGHT_MARGIN = 1.65 * cm
+TOP_MARGIN = 2.15 * cm
+BOTTOM_MARGIN = 1.75 * cm
+CONTENT_WIDTH = PAGE_W - LEFT_MARGIN - RIGHT_MARGIN
+
+
+# -----------------------------------------------------------------------------
+# HELPERS
+# -----------------------------------------------------------------------------
+def _safe(text):
+    """Escape text for ReportLab Paragraph XML while preserving None safely."""
+    return escape(str(text or ""))
+
+
+def _inline_markup(text):
+    """Convert a small, safe subset of markdown into ReportLab paragraph markup."""
+    text = _safe(text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<i>\1</i>", text)
+    text = re.sub(
+        r"`([^`]+)`",
+        r'<font face="Courier" color="#52606D">\1</font>',
+        text,
+    )
+    return text
+
+
+def _is_numeric(text):
+    return bool(re.fullmatch(r"[\d\s,.*%()/:+\-]+", str(text).strip()))
+
+
+def _is_yes_no_line(line):
+    match = re.match(r"^(.*?):\s*(Yes|No)\s*$", line.strip(), flags=re.I)
+    return match.groups() if match else None
+
+
+def _looks_like_markdown_separator(cells):
+    if not cells:
+        return False
+    return all(bool(re.fullmatch(r":?-{3,}:?", c.replace(" ", ""))) for c in cells)
+
+
+# -----------------------------------------------------------------------------
+# MARKDOWN TABLE PARSING
+# -----------------------------------------------------------------------------
 def parse_markdown_table(text):
-    """
-    Parse markdown table into reportlab Table object
-    Returns None if no table found
-    """
-    lines = text.strip().split('\n')
-    table_data = []
-    
-    for line in lines:
-        if '|' in line:
-            # Remove leading/trailing pipes and split
-            cells = [cell.strip() for cell in line.strip('|').split('|')]
-            # Skip separator lines (those with dashes)
-            if not all(set(cell.replace('-', '').replace(' ', '')) == set() for cell in cells if cell):
-                table_data.append(cells)
-    
-    if len(table_data) >= 2:  # At least header + one row
-        return table_data
-    return None
+    """Parse a markdown-style table into a list of rows."""
+    rows = []
+    for raw_line in text.strip().splitlines():
+        line = raw_line.strip()
+        if "|" not in line:
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if _looks_like_markdown_separator(cells):
+            continue
+        rows.append(cells)
+
+    if len(rows) < 2:
+        return None
+
+    width = max(len(r) for r in rows)
+    return [r + [""] * (width - len(r)) for r in rows]
+
 
 def parse_content_with_tables(content):
-    """
-    Parse content and return list of elements (text chunks and tables)
-    """
+    """Split assistant content into text blocks and markdown tables."""
     elements = []
-    
-    # Split content by table patterns
-    lines = content.split('\n')
     current_text = []
-    in_table = False
     table_lines = []
-    
-    for line in lines:
-        if '|' in line and ('-' in line or any(c.isalnum() for c in line)):
+    in_table = False
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        is_table_line = "|" in stripped and len(stripped.split("|")) >= 3
+
+        if is_table_line:
             if not in_table:
-                # Save accumulated text
                 if current_text:
-                    elements.append(('text', '\n'.join(current_text)))
+                    elements.append(("text", "\n".join(current_text)))
                     current_text = []
                 in_table = True
             table_lines.append(line)
         else:
             if in_table:
-                # End of table
-                table_data = parse_markdown_table('\n'.join(table_lines))
+                table_data = parse_markdown_table("\n".join(table_lines))
                 if table_data:
-                    elements.append(('table', table_data))
+                    elements.append(("table", table_data))
                 table_lines = []
                 in_table = False
             current_text.append(line)
-    
-    # Handle remaining content
+
     if in_table and table_lines:
-        table_data = parse_markdown_table('\n'.join(table_lines))
+        table_data = parse_markdown_table("\n".join(table_lines))
         if table_data:
-            elements.append(('table', table_data))
+            elements.append(("table", table_data))
     elif current_text:
-        elements.append(('text', '\n'.join(current_text)))
-    
+        elements.append(("text", "\n".join(current_text)))
+
     return elements
 
-def create_table_from_data(table_data):
-    """
-    Create a professionally styled government-standard table
-    Following departmental guidelines for reports
-    """
-    from reportlab.platypus import Paragraph
-    from reportlab.lib.styles import ParagraphStyle
-    
-    # Government-style table cell styles
-    cell_style = ParagraphStyle(
-        'TableCell',
-        fontName='Helvetica',
-        fontSize=10,
-        leading=13,
-        wordWrap='LTR',
+
+# -----------------------------------------------------------------------------
+# STYLE SYSTEM
+# -----------------------------------------------------------------------------
+def build_styles():
+    base = getSampleStyleSheet()
+    styles = {}
+
+    styles["body"] = ParagraphStyle(
+        "Body",
+        parent=base["Normal"],
+        fontName="Helvetica",
+        fontSize=10.4,
+        leading=15.2,
+        textColor=INK,
         alignment=TA_LEFT,
-        textColor=HexColor('#1A1A1A')
+        spaceAfter=7,
     )
-    
-    cell_style_center = ParagraphStyle(
-        'TableCellCenter',
-        fontName='Helvetica',
-        fontSize=10,
-        leading=13,
-        wordWrap='LTR',
-        alignment=TA_CENTER,
-        textColor=HexColor('#1A1A1A')
+    styles["body_justify"] = ParagraphStyle(
+        "BodyJustify",
+        parent=styles["body"],
+        alignment=TA_JUSTIFY,
     )
-    
-    header_style = ParagraphStyle(
-        'TableHeader',
-        fontName='Helvetica-Bold',
-        fontSize=11,
+    styles["small"] = ParagraphStyle(
+        "Small",
+        parent=styles["body"],
+        fontSize=8.8,
+        leading=12,
+        textColor=MUTED,
+    )
+    styles["eyebrow"] = ParagraphStyle(
+        "Eyebrow",
+        parent=base["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=8.4,
+        leading=10,
+        textColor=TEAL,
+        uppercase=True,
+        tracking=0.9,
+        spaceAfter=8,
+    )
+    styles["h1"] = ParagraphStyle(
+        "H1",
+        parent=base["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=20,
+        leading=24,
+        textColor=NAVY,
+        spaceBefore=8,
+        spaceAfter=10,
+    )
+    styles["h2"] = ParagraphStyle(
+        "H2",
+        parent=base["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=14.5,
+        leading=18,
+        textColor=NAVY,
+        spaceBefore=12,
+        spaceAfter=8,
+    )
+    styles["h3"] = ParagraphStyle(
+        "H3",
+        parent=base["Heading3"],
+        fontName="Helvetica-Bold",
+        fontSize=11.6,
+        leading=15,
+        textColor=BLUE_DARK,
+        spaceBefore=9,
+        spaceAfter=5,
+    )
+    styles["indicator"] = ParagraphStyle(
+        "Indicator",
+        parent=styles["body"],
+        fontName="Helvetica-Bold",
+        fontSize=12.2,
+        leading=16,
+        textColor=NAVY,
+        spaceAfter=0,
+    )
+    styles["label"] = ParagraphStyle(
+        "Label",
+        parent=styles["body"],
+        fontName="Helvetica-Bold",
+        fontSize=9.4,
+        leading=12.5,
+        textColor=NAVY,
+        spaceAfter=0,
+    )
+    styles["explanation"] = ParagraphStyle(
+        "Explanation",
+        parent=styles["body"],
+        fontSize=9.7,
         leading=14,
-        textColor=white,
-        alignment=TA_CENTER
+        textColor=INK,
+        leftIndent=0.15 * cm,
+        spaceAfter=7,
     )
-    
-    # Calculate optimal column widths
-    available_width = 17 * cm  # A4 width (21cm) - 2cm margins on each side
-    num_cols = len(table_data[0]) if table_data else 1
-    
-    # Analyze content to determine column widths
-    col_content_lengths = [0] * num_cols
-    for row in table_data:
-        for col_idx, cell in enumerate(row):
-            cell_len = len(str(cell).strip())
-            col_content_lengths[col_idx] = max(col_content_lengths[col_idx], cell_len)
-    
-    # Calculate proportional widths
-    total_content_weight = sum(col_content_lengths)
-    col_widths = []
-    min_width = 2 * cm
-    
-    for content_length in col_content_lengths:
-        if total_content_weight > 0:
-            proportional_width = (content_length / total_content_weight) * available_width
-            width = max(min_width, proportional_width)
-        else:
-            width = available_width / num_cols
-        col_widths.append(width)
-    
-    # Normalize widths
-    total_width = sum(col_widths)
-    if total_width != available_width:
-        scale_factor = available_width / total_width
-        col_widths = [w * scale_factor for w in col_widths]
-    
-    # Convert cells to Paragraphs
-    wrapped_data = []
-    for i, row in enumerate(table_data):
+    styles["conclusion"] = ParagraphStyle(
+        "Conclusion",
+        parent=styles["body"],
+        fontSize=9.8,
+        leading=14.2,
+        textColor=NAVY,
+        spaceAfter=0,
+    )
+    styles["table_header"] = ParagraphStyle(
+        "TableHeader",
+        parent=base["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=8.5,
+        leading=10.6,
+        textColor=WHITE,
+        alignment=TA_CENTER,
+    )
+    styles["table_cell"] = ParagraphStyle(
+        "TableCell",
+        parent=base["Normal"],
+        fontName="Helvetica",
+        fontSize=8.25,
+        leading=10.8,
+        textColor=INK,
+        alignment=TA_LEFT,
+    )
+    styles["table_cell_center"] = ParagraphStyle(
+        "TableCellCenter",
+        parent=styles["table_cell"],
+        alignment=TA_CENTER,
+    )
+    styles["table_title"] = ParagraphStyle(
+        "TableTitle",
+        parent=styles["body"],
+        fontName="Helvetica-Bold",
+        fontSize=10.5,
+        leading=14,
+        textColor=NAVY,
+        spaceBefore=8,
+        spaceAfter=7,
+    )
+    styles["cover_title"] = ParagraphStyle(
+        "CoverTitle",
+        parent=base["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=27,
+        leading=31,
+        textColor=WHITE,
+        alignment=TA_LEFT,
+        spaceAfter=9,
+    )
+    styles["cover_subtitle"] = ParagraphStyle(
+        "CoverSubtitle",
+        parent=styles["body"],
+        fontSize=12.5,
+        leading=17,
+        textColor=HexColor("#D8E7F1"),
+        spaceAfter=0,
+    )
+    return styles
+
+
+# -----------------------------------------------------------------------------
+# COMPONENTS
+# -----------------------------------------------------------------------------
+def make_status_pill(value, styles):
+    val = str(value).strip().lower()
+    if val == "yes":
+        fg, bg, label = SUCCESS, SUCCESS_BG, "YES"
+    elif val == "no":
+        fg, bg, label = DANGER, DANGER_BG, "NO"
+    else:
+        fg, bg, label = WARNING, WARNING_BG, str(value).upper()
+
+    pill_style = ParagraphStyle(
+        "Pill",
+        parent=styles["small"],
+        fontName="Helvetica-Bold",
+        fontSize=8.2,
+        leading=9,
+        textColor=fg,
+        alignment=TA_CENTER,
+    )
+    pill = Table([[Paragraph(_safe(label), pill_style)]], colWidths=[1.28 * cm])
+    pill.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), bg),
+                ("BOX", (0, 0), (-1, -1), 0.6, fg),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 3.2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3.2),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
+        )
+    )
+    return pill
+
+
+def make_indicator_card(indicator_text, styles):
+    eyebrow = Paragraph("INDICATOR", styles["eyebrow"])
+    title = Paragraph(_inline_markup(indicator_text), styles["indicator"])
+    inner = Table([[eyebrow], [title]], colWidths=[CONTENT_WIDTH - 0.6 * cm])
+    inner.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), SURFACE_BLUE),
+                ("LINEBEFORE", (0, 0), (0, -1), 3.2, BLUE),
+                ("TOPPADDING", (0, 0), (-1, 0), 11),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 1),
+                ("TOPPADDING", (0, 1), (-1, 1), 0),
+                ("BOTTOMPADDING", (0, 1), (-1, 1), 11),
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+    return inner
+
+
+def make_question_row(question, value, styles):
+    question_para = Paragraph(_inline_markup(question), styles["label"])
+    pill = make_status_pill(value, styles)
+    row = Table([[question_para, pill]], colWidths=[CONTENT_WIDTH - 2.25 * cm, 1.45 * cm])
+    row.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (0, 0), 0),
+                ("RIGHTPADDING", (0, 0), (0, 0), 8),
+                ("LEFTPADDING", (1, 0), (1, 0), 0),
+                ("RIGHTPADDING", (1, 0), (1, 0), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]
+        )
+    )
+    return row
+
+
+def make_conclusion_box(text, styles):
+    label_style = ParagraphStyle(
+        "ConclusionLabel",
+        parent=styles["eyebrow"],
+        textColor=TEAL,
+        spaceAfter=4,
+    )
+    content = [
+        Paragraph("CONCLUSION", label_style),
+        Paragraph(_inline_markup(text), styles["conclusion"]),
+    ]
+    body = Table([[content]], colWidths=[CONTENT_WIDTH - 0.55 * cm])
+    body.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), SURFACE_TEAL),
+                ("BOX", (0, 0), (-1, -1), 0.7, HexColor("#B9DED8")),
+                ("LINEBEFORE", (0, 0), (0, -1), 3.2, TEAL),
+                ("TOPPADDING", (0, 0), (-1, -1), 11),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 11),
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+    return body
+
+
+def _calculate_col_widths(table_data, available_width):
+    cols = max(len(row) for row in table_data)
+    max_lengths = [1] * cols
+    header_lengths = [1] * cols
+
+    for r_idx, row in enumerate(table_data):
+        for c in range(cols):
+            text = str(row[c] if c < len(row) else "").strip()
+            # cap influence of extremely long cells so one column does not dominate
+            effective_len = min(max(len(text), 1), 80)
+            max_lengths[c] = max(max_lengths[c], effective_len)
+            if r_idx == 0:
+                header_lengths[c] = max(header_lengths[c], min(len(text), 40))
+
+    weights = [max(6, 0.72 * max_lengths[i] + 0.28 * header_lengths[i]) for i in range(cols)]
+
+    # Common report pattern: first column is a row number/id, keep it compact.
+    first_header = str(table_data[0][0]).strip().lower() if table_data and table_data[0] else ""
+    if cols >= 4 and first_header in {"no", "#", "id", "nr", "number"}:
+        first_width = 1.05 * cm
+        rest = available_width - first_width
+        rest_weights = weights[1:]
+        rest_total = sum(rest_weights) or 1
+        widths = [first_width] + [rest * (w / rest_total) for w in rest_weights]
+    else:
+        total = sum(weights) or 1
+        widths = [available_width * (w / total) for w in weights]
+
+    # Prevent unusably narrow data columns.
+    min_width = 1.35 * cm if cols >= 6 else 1.65 * cm
+    widths = [max(min_width, w) for w in widths]
+    scale = available_width / sum(widths)
+    return [w * scale for w in widths]
+
+
+def create_table_from_data(table_data, styles=None):
+    """Create a modern, adaptive professional table."""
+    styles = styles or build_styles()
+    if not table_data:
+        return Spacer(1, 0)
+
+    cols = max(len(r) for r in table_data)
+    normalized = [r + [""] * (cols - len(r)) for r in table_data]
+    col_widths = _calculate_col_widths(normalized, CONTENT_WIDTH)
+
+    # Reduce type slightly for very wide tables.
+    if cols >= 6:
+        cell_style = ParagraphStyle(
+            "WideCell", parent=styles["table_cell"], fontSize=7.7, leading=9.8
+        )
+        center_style = ParagraphStyle(
+            "WideCellCenter", parent=cell_style, alignment=TA_CENTER
+        )
+        header_style = ParagraphStyle(
+            "WideHeader", parent=styles["table_header"], fontSize=7.9, leading=9.7
+        )
+    else:
+        cell_style = styles["table_cell"]
+        center_style = styles["table_cell_center"]
+        header_style = styles["table_header"]
+
+    wrapped = []
+    for r_idx, row in enumerate(normalized):
         wrapped_row = []
-        for col_idx, cell in enumerate(row):
-            cell_text = str(cell).strip()
-            
-            # Check if cell contains numbers (for center alignment)
-            is_numeric = bool(re.match(r'^[\d\s,.-]+$', cell_text)) if cell_text else False
-            
-            if i == 0:  # Header
-                wrapped_row.append(Paragraph(cell_text, header_style))
-            else:  # Body - center numbers, left-align text
-                style = cell_style_center if is_numeric and col_idx > 0 else cell_style
-                wrapped_row.append(Paragraph(cell_text, style))
-        wrapped_data.append(wrapped_row)
-    
-    # Create table
-    table = Table(wrapped_data, colWidths=col_widths, repeatRows=1)
-    
-    # Government-style professional table styling
-    style = TableStyle([
-        # Header styling - deep blue background
-        ('BACKGROUND', (0, 0), (-1, 0), HexColor('#004C99')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), white),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 11),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-        ('TOPPADDING', (0, 0), (-1, 0), 8),
-        
-        # Body styling
-        ('BACKGROUND', (0, 1), (-1, -1), white),
-        ('TEXTCOLOR', (0, 1), (-1, -1), HexColor('#1A1A1A')),
-        ('TOPPADDING', (0, 1), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-        
-        # Thin light grey borders
-        ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#D9D9D9')),
-        ('LINEBELOW', (0, 0), (-1, 0), 1, HexColor('#003366')),
-        
-        # Alternating row colors (white and light grey)
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [white, HexColor('#F8F8F8')]),
-        
-        # Text wrapping
-        ('WORDWRAP', (0, 0), (-1, -1), True),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-    ])
-    
-    table.setStyle(style)
+        for c_idx, cell in enumerate(row):
+            text = str(cell).strip()
+            if r_idx == 0:
+                wrapped_row.append(Paragraph(_inline_markup(text), header_style))
+            else:
+                p_style = center_style if _is_numeric(text) else cell_style
+                wrapped_row.append(Paragraph(_inline_markup(text), p_style))
+        wrapped.append(wrapped_row)
+
+    table = Table(
+        wrapped,
+        colWidths=col_widths,
+        repeatRows=1,
+        hAlign="LEFT",
+        splitByRow=1,
+    )
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+                ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                ("TOPPADDING", (0, 0), (-1, 0), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+                ("LEFTPADDING", (0, 0), (-1, 0), 6),
+                ("RIGHTPADDING", (0, 0), (-1, 0), 6),
+                ("TOPPADDING", (0, 1), (-1, -1), 6.5),
+                ("BOTTOMPADDING", (0, 1), (-1, -1), 6.5),
+                ("LEFTPADDING", (0, 1), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 1), (-1, -1), 6),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, SURFACE]),
+                ("LINEBELOW", (0, 0), (-1, 0), 1.15, BLUE),
+                ("INNERGRID", (0, 1), (-1, -1), 0.35, BORDER),
+                ("BOX", (0, 0), (-1, -1), 0.55, BORDER),
+            ]
+        )
+    )
     return table
 
-def clean_text_formatting(text):
-    """
-    Clean and enhance markdown formatting for professional government-style report
-    Handles headers, bold, italic, code, lists, and indicators
-    Returns a list of formatted text chunks and special elements
-    """
-    lines = text.split('\n')
-    formatted_lines = []
-    conclusion_text = []
-    in_conclusion = False
-    
-    for line in lines:
-        original_line = line
-        line = line.strip()
-        
-        if not line:
-            if not in_conclusion:
-                formatted_lines.append('')
-            continue
-        
-        # Check for conclusion box
-        if line.lower().startswith('conclusion:'):
-            if formatted_lines:
-                # Yield accumulated content before conclusion
-                yield ('text', '<br/>'.join(formatted_lines))
-                formatted_lines = []
-            in_conclusion = True
-            # Get text after "Conclusion:" on the same line
-            conclusion_start = line[11:].strip() if len(line) > 11 else ''
-            if conclusion_start:
-                conclusion_text = [conclusion_start]
-            else:
-                conclusion_text = []
-            continue
-        elif in_conclusion:
-            # Check if conclusion ends (new heading or indicator or double newline)
-            if line.startswith('#') or line.lower().startswith('indicator:'):
-                # End conclusion, yield it
-                if conclusion_text:
-                    conclusion_content = ' '.join(conclusion_text)
-                    yield ('conclusion', conclusion_content)
-                    conclusion_text = []
-                in_conclusion = False
-                # Continue processing this line (don't skip it)
-            else:
-                # Add to conclusion
-                conclusion_text.append(line)
-                continue
-                
-        # Headers with government color scheme
-        if line.startswith('### '):
-            # H3 - Subheading (12pt, semi-bold, #333333)
-            content = line[4:].strip()
-            formatted_lines.append(f'<font size="12" color="#333333"><b>{content}</b></font>')
-        elif line.startswith('## '):
-            # H2 - Section header (14pt, bold, #004C99)
-            content = line[3:].strip()
-            formatted_lines.append(f'<font size="14" color="#004C99"><b>{content}</b></font>')
-        elif line.startswith('# '):
-            # H1 - Main header (18pt, bold, #003366)
-            content = line[2:].strip()
-            formatted_lines.append(f'<font size="18" color="#003366"><b>{content}</b></font>')
-        else:
-            # Process inline formatting
-            # Bold
-            line = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', line)
-            # Italic
-            line = re.sub(r'\*([^*]+)\*', r'<i>\1</i>', line)
-            # Code - subtle styling
-            line = re.sub(r'`([^`]+)`', r'<font face="Courier" color="#666666"><b>\1</b></font>', line)
-            
-            # Check marks for Yes/No indicators
-            if '✔' in line or '✓' in line:
-                line = line.replace('✔', '<font color="#008000">✔</font>')
-                line = line.replace('✓', '<font color="#008000">✓</font>')
-            if '✖' in line or '✗' in line:
-                line = line.replace('✖', '<font color="#CC0000">✖</font>')
-                line = line.replace('✗', '<font color="#CC0000">✗</font>')
-            
-            # Bullet points with proper indentation
-            if line.startswith('- ') or line.startswith('* '):
-                line = '  • ' + line[2:]
-            elif re.match(r'^\d+\.\s', line):
-                # Numbered lists
-                line = '  ' + line
-            
-            # Specific keyword styling
-            # Make "Indicator Assessment" a header
-            if line.lower().startswith('indicator assessment'):
-                line = f'<font size="14" color="#004C99"><b>{line}</b></font>'
-            # Make only the word "Explanation" bold (not the explanation text)
-            elif line.lower().startswith('explanation:'):
-                line = re.sub(r'^(explanation:)', r'<b>\1</b>', line, flags=re.IGNORECASE)
-            # Bold these specific assessment questions
-            elif line.lower().startswith('reported indicator is consistent with planned indicator:'):
-                line = re.sub(r'^(reported indicator is consistent with planned indicator:)', r'<b>\1</b>', line, flags=re.IGNORECASE)
-            elif line.lower().startswith('reported planned annual target is consistent with planned target:'):
-                line = re.sub(r'^(reported planned annual target is consistent with planned target:)', r'<b>\1</b>', line, flags=re.IGNORECASE)
-            elif line.lower().startswith('reported achievement(s) is consistent with planned and reported indicators/targets:'):
-                line = re.sub(r'^(reported achievement\(s\) is consistent with planned and reported indicators/targets:)', r'<b>\1</b>', line, flags=re.IGNORECASE)
-            elif line.lower().startswith('reason for variances/deviation:'):
-                line = re.sub(r'^(reason for variances/deviation:)', r'<b>\1</b>', line, flags=re.IGNORECASE)
-            # Indicator: style (bold, navy)
-            elif line.lower().startswith('indicator:'):
-                line = f'<font size="12" color="#003366"><b>{line}</b></font>'
-            
-            formatted_lines.append(line)
-    
-    # Yield any remaining conclusion at the end of text
-    if in_conclusion and conclusion_text:
-        conclusion_content = ' '.join(conclusion_text)
-        yield ('conclusion', conclusion_content)
-    
-    # Yield any remaining text
-    if formatted_lines:
-        yield ('text', '<br/>'.join(formatted_lines))
 
-class HeaderFooterCanvas(canvas.Canvas):
-    """
-    Custom canvas for adding headers and footers to pages
-    """
+# -----------------------------------------------------------------------------
+# CONTENT RENDERER
+# -----------------------------------------------------------------------------
+def render_text_block(text, styles):
+    """Convert text into modern report flowables while preserving source content."""
+    flowables = []
+    lines = text.splitlines()
+    i = 0
+    paragraph_buffer = []
+
+    def flush_buffer():
+        nonlocal paragraph_buffer
+        if paragraph_buffer:
+            merged = " ".join(x.strip() for x in paragraph_buffer if x.strip())
+            if merged:
+                flowables.append(Paragraph(_inline_markup(merged), styles["body_justify"]))
+            paragraph_buffer = []
+
+    while i < len(lines):
+        raw = lines[i]
+        line = raw.strip()
+
+        if not line:
+            flush_buffer()
+            i += 1
+            continue
+
+        if line.startswith("# "):
+            flush_buffer()
+            flowables.append(Paragraph(_inline_markup(line[2:].strip()), styles["h1"]))
+            flowables.append(HRFlowable(width="100%", thickness=1.2, color=BLUE, spaceAfter=8))
+            i += 1
+            continue
+
+        if line.startswith("## "):
+            flush_buffer()
+            flowables.append(Paragraph(_inline_markup(line[3:].strip()), styles["h2"]))
+            i += 1
+            continue
+
+        if line.startswith("### "):
+            flush_buffer()
+            flowables.append(Paragraph(_inline_markup(line[4:].strip()), styles["h3"]))
+            i += 1
+            continue
+
+        if line.lower() == "indicator assessment":
+            flush_buffer()
+            flowables.append(Spacer(1, 0.08 * cm))
+            flowables.append(Paragraph("INDICATOR ASSESSMENT", styles["h2"]))
+            flowables.append(HRFlowable(width="100%", thickness=0.8, color=BORDER, spaceAfter=7))
+            i += 1
+            continue
+
+        if line.lower().startswith("indicator:"):
+            flush_buffer()
+            indicator_text = line.split(":", 1)[1].strip()
+            flowables.append(Spacer(1, 0.1 * cm))
+            flowables.append(make_indicator_card(indicator_text, styles))
+            flowables.append(Spacer(1, 0.15 * cm))
+            i += 1
+            continue
+
+        yn = _is_yes_no_line(line)
+        if yn:
+            flush_buffer()
+            question, value = yn
+            flowables.append(make_question_row(question + ":", value, styles))
+            i += 1
+            continue
+
+        if line.lower().startswith("explanation:"):
+            flush_buffer()
+            explanation = line.split(":", 1)[1].strip()
+            # Continue wrapped source lines until the next recognized structural line.
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if (
+                    not nxt
+                    or nxt.lower().startswith("indicator:")
+                    or nxt.lower().startswith("conclusion:")
+                    or nxt.lower() == "indicator assessment"
+                    or _is_yes_no_line(nxt)
+                    or nxt.startswith("#")
+                ):
+                    break
+                explanation += " " + nxt
+                j += 1
+            label = Paragraph("<b>Explanation</b>", styles["small"])
+            content = Paragraph(_inline_markup(explanation), styles["explanation"])
+            flowables.extend([label, content])
+            i = j
+            continue
+
+        if line.lower().startswith("conclusion:"):
+            flush_buffer()
+            conclusion = line.split(":", 1)[1].strip()
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if (
+                    not nxt
+                    or nxt.lower().startswith("indicator:")
+                    or nxt.lower() == "indicator assessment"
+                    or nxt.startswith("#")
+                    or _is_yes_no_line(nxt)
+                ):
+                    break
+                conclusion += " " + nxt
+                j += 1
+            flowables.append(Spacer(1, 0.06 * cm))
+            flowables.append(make_conclusion_box(conclusion, styles))
+            flowables.append(Spacer(1, 0.19 * cm))
+            i = j
+            continue
+
+        if line.startswith("- ") or line.startswith("* "):
+            flush_buffer()
+            bullet_text = line[2:].strip()
+            bullet_style = ParagraphStyle(
+                "BulletModern",
+                parent=styles["body"],
+                leftIndent=0.45 * cm,
+                firstLineIndent=-0.22 * cm,
+                bulletIndent=0.12 * cm,
+                spaceAfter=4,
+            )
+            flowables.append(Paragraph(_inline_markup(bullet_text), bullet_style, bulletText="•"))
+            i += 1
+            continue
+
+        if re.match(r"^\d+\.\s+", line):
+            flush_buffer()
+            num, content = line.split(".", 1)
+            list_style = ParagraphStyle(
+                "NumberedModern",
+                parent=styles["body"],
+                leftIndent=0.52 * cm,
+                firstLineIndent=-0.34 * cm,
+                spaceAfter=4,
+            )
+            flowables.append(Paragraph(_inline_markup(content.strip()), list_style, bulletText=f"{num}."))
+            i += 1
+            continue
+
+        paragraph_buffer.append(line)
+        i += 1
+
+    flush_buffer()
+    return flowables
+
+
+# -----------------------------------------------------------------------------
+# HEADER / FOOTER CANVAS
+# -----------------------------------------------------------------------------
+class ModernReportCanvas(canvas.Canvas):
+    """Canvas that adds polished running headers, footers and total page count."""
+
     def __init__(self, *args, **kwargs):
-        canvas.Canvas.__init__(self, *args, **kwargs)
-        self.pages = []
-        
+        super().__init__(*args, **kwargs)
+        self._saved_pages = []
+
     def showPage(self):
-        self.pages.append(dict(self.__dict__))
+        self._saved_pages.append(dict(self.__dict__))
         self._startPage()
-        
+
     def save(self):
-        page_count = len(self.pages)
-        for page_num, page_dict in enumerate(self.pages, 1):
-            self.__dict__.update(page_dict)
-            self.draw_page_decorations(page_num, page_count)
-            canvas.Canvas.showPage(self)
-        canvas.Canvas.save(self)
-        
-    def draw_page_decorations(self, page_num, page_count):
-        """
-        Draw header and footer on each page
-        """
-        # Header
+        total = len(self._saved_pages)
+        for page_no, page_state in enumerate(self._saved_pages, 1):
+            self.__dict__.update(page_state)
+            self._draw_chrome(page_no, total)
+            super().showPage()
+        super().save()
+
+    def _draw_chrome(self, page_no, total):
         self.saveState()
-        self.setFont('Helvetica', 10)
-        self.setFillColor(HexColor('#666666'))
-        self.drawString(2*cm, A4[1] - 1.3*cm, "Professional Report")
-        
-        # Header line
-        self.setStrokeColor(HexColor('#D0D0D0'))
-        self.setLineWidth(0.5)
-        self.line(2*cm, A4[1] - 1.5*cm, A4[0] - 2*cm, A4[1] - 1.5*cm)
-        
-        # Footer - page numbers
-        self.setFont('Helvetica', 9)
-        self.setFillColor(HexColor('#666666'))
-        footer_text = f"Page {page_num} of {page_count}"
-        self.drawCentredString(A4[0] / 2, 1*cm, footer_text)
-        
-        # Footer - date
-        date_text = datetime.now().strftime("%B %d, %Y")
-        self.drawString(2*cm, 1*cm, date_text)
-        
+
+        # Cover page has intentionally minimal chrome.
+        if page_no == 1:
+            self.setFillColor(MUTED)
+            self.setFont("Helvetica", 8.2)
+            self.drawRightString(PAGE_W - LEFT_MARGIN, 0.8 * cm, f"{page_no:02d}")
+            self.restoreState()
+            return
+
+        # top accent + running title
+        self.setFillColor(BLUE)
+        self.rect(LEFT_MARGIN, PAGE_H - 1.14 * cm, 0.42 * cm, 0.07 * cm, fill=1, stroke=0)
+        self.setFillColor(NAVY)
+        self.setFont("Helvetica-Bold", 8.4)
+        self.drawString(LEFT_MARGIN + 0.55 * cm, PAGE_H - 1.15 * cm, "PROFESSIONAL ASSESSMENT REPORT")
+
+        self.setStrokeColor(BORDER)
+        self.setLineWidth(0.45)
+        self.line(LEFT_MARGIN, PAGE_H - 1.42 * cm, PAGE_W - RIGHT_MARGIN, PAGE_H - 1.42 * cm)
+
+        # footer
+        self.line(LEFT_MARGIN, 1.25 * cm, PAGE_W - RIGHT_MARGIN, 1.25 * cm)
+        self.setFillColor(MUTED)
+        self.setFont("Helvetica", 7.9)
+        self.drawString(LEFT_MARGIN, 0.83 * cm, datetime.now().strftime("%d %B %Y"))
+        self.drawRightString(PAGE_W - RIGHT_MARGIN, 0.83 * cm, f"Page {page_no} of {total}")
+
         self.restoreState()
 
-def generate_chat_pdf(messages, output_path="output.pdf"):
-    """
-    Generate a professional government-style report PDF from messages
-    Following departmental standards with proper headers, footers, and formatting
-    
-    Args:
-        messages: List of message dicts with {role, content, timestamp}
-        output_path: Where to save the PDF
-    """
-    
-    # Create PDF document with government-standard margins
-    doc = SimpleDocTemplate(
-        output_path, 
-        pagesize=A4, 
-        rightMargin=2*cm,
-        leftMargin=2*cm,
-        topMargin=1.8*cm,
-        bottomMargin=1.5*cm
-    )
-    story = []
-    
-    # Get default styles
-    styles = getSampleStyleSheet()
-    
-    # Government-style professional body text
-    report_body_style = ParagraphStyle(
-        'ReportBody',
-        parent=styles['Normal'],
-        fontSize=11,
-        textColor=HexColor('#1A1A1A'),
-        spaceAfter=12,
-        spaceBefore=6,
-        leftIndent=0,
-        rightIndent=0,
-        alignment=TA_JUSTIFY,
-        leading=16,
-        fontName='Helvetica'
-    )
-    
-    # Cover page title
-    title_style = ParagraphStyle(
-        'CoverTitle',
-        parent=styles['Title'],
-        fontSize=24,
-        textColor=HexColor('#003366'),
-        spaceAfter=20,
-        fontName='Helvetica-Bold',
-        alignment=TA_CENTER,
-        leading=30
-    )
-    
-    # Subtitle style
-    subtitle_style = ParagraphStyle(
-        'CoverSubtitle',
-        parent=styles['Normal'],
-        fontSize=14,
-        textColor=HexColor('#004C99'),
-        spaceAfter=40,
-        alignment=TA_CENTER,
-        fontName='Helvetica'
-    )
-    
-    # Metadata style
-    metadata_style = ParagraphStyle(
-        'Metadata',
-        parent=styles['Normal'],
-        fontSize=11,
-        textColor=HexColor('#666666'),
-        spaceAfter=8,
-        alignment=TA_LEFT,
-        fontName='Helvetica'
-    )
-    
-    # Table title style
-    table_title_style = ParagraphStyle(
-        'TableTitle',
-        parent=styles['Normal'],
-        fontSize=12,
-        textColor=HexColor('#003366'),
-        spaceAfter=8,
-        spaceBefore=16,
-        fontName='Helvetica-Bold',
-        alignment=TA_LEFT
-    )
-    
-    # ===== COVER PAGE =====
-    story.append(Spacer(1, 3*cm))
-    
-    # Main title
-    title = Paragraph("Professional Assessment Report", title_style)
-    story.append(title)
-    
-    # Subtitle
-    subtitle = Paragraph("Performance Analysis and Evaluation", subtitle_style)
-    story.append(subtitle)
-    
-    story.append(Spacer(1, 4*cm))
-    
-    # Metadata section
-    date_str = datetime.now().strftime("%B %d, %Y")
-    
-    metadata_items = [
-        f"<b>Date Generated:</b> {date_str}",
-        f"<b>Document Type:</b> Professional Report",
-        f"<b>Status:</b> Final"
+
+# -----------------------------------------------------------------------------
+# COVER PAGE
+# -----------------------------------------------------------------------------
+def add_cover_page(story, styles, title, subtitle, document_type="Professional Report", status="Final"):
+    story.append(Spacer(1, 1.05 * cm))
+
+    # Hero panel
+    hero_content = [
+        Paragraph("PERFORMANCE & ASSURANCE", styles["eyebrow"]),
+        Paragraph(_safe(title), styles["cover_title"]),
+        Paragraph(_safe(subtitle), styles["cover_subtitle"]),
     ]
-    
-    for item in metadata_items:
-        story.append(Paragraph(item, metadata_style))
-    
-    story.append(Spacer(1, 2*cm))
-    
-    # Confidentiality notice
-    notice_style = ParagraphStyle(
-        'Notice',
-        parent=styles['Normal'],
-        fontSize=9,
-        textColor=HexColor('#999999'),
-        alignment=TA_CENTER,
-        fontName='Helvetica-Oblique'
+    hero = Table([[hero_content]], colWidths=[CONTENT_WIDTH])
+    hero.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), NAVY),
+                ("LINEBEFORE", (0, 0), (0, -1), 5, TEAL),
+                ("TOPPADDING", (0, 0), (-1, -1), 28),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 30),
+                ("LEFTPADDING", (0, 0), (-1, -1), 24),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 24),
+            ]
+        )
     )
-    notice = Paragraph("This document contains professional analysis and assessment data", notice_style)
-    story.append(notice)
-    
-    # Page break after cover
+    story.append(hero)
+    story.append(Spacer(1, 0.75 * cm))
+
+    intro = Paragraph(
+        "A structured, presentation-ready report generated from the assessment output, with emphasis on clarity, traceability and professional readability.",
+        ParagraphStyle(
+            "CoverIntro",
+            parent=styles["body"],
+            fontSize=11,
+            leading=16.3,
+            textColor=MUTED,
+            spaceAfter=0,
+        ),
+    )
+    story.append(intro)
+    story.append(Spacer(1, 1.2 * cm))
+
+    date_str = datetime.now().strftime("%d %B %Y")
+    meta = [
+        ["DATE GENERATED", "DOCUMENT TYPE", "STATUS"],
+        [date_str, document_type, status.upper()],
+    ]
+    meta_header = ParagraphStyle(
+        "MetaHeader",
+        parent=styles["small"],
+        fontName="Helvetica-Bold",
+        fontSize=7.8,
+        textColor=MUTED,
+        alignment=TA_LEFT,
+    )
+    meta_value = ParagraphStyle(
+        "MetaValue",
+        parent=styles["body"],
+        fontName="Helvetica-Bold",
+        fontSize=10.1,
+        textColor=NAVY,
+    )
+    wrapped_meta = [
+        [Paragraph(_safe(x), meta_header) for x in meta[0]],
+        [Paragraph(_safe(x), meta_value) for x in meta[1]],
+    ]
+    meta_table = Table(wrapped_meta, colWidths=[CONTENT_WIDTH / 3] * 3)
+    meta_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), SURFACE),
+                ("BOX", (0, 0), (-1, -1), 0.6, BORDER),
+                ("INNERGRID", (0, 0), (-1, -1), 0.4, BORDER),
+                ("TOPPADDING", (0, 0), (-1, 0), 10),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 3),
+                ("TOPPADDING", (0, 1), (-1, 1), 2),
+                ("BOTTOMPADDING", (0, 1), (-1, 1), 11),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ]
+        )
+    )
+    story.append(meta_table)
+
+    story.append(Spacer(1, 2.1 * cm))
+    story.append(
+        HRFlowable(width="22%", thickness=2.4, color=TEAL, hAlign="LEFT", spaceAfter=10)
+    )
+    confidentiality = Paragraph(
+        "Prepared for professional review. Content reflects the source assessment supplied to the generator.",
+        styles["small"],
+    )
+    story.append(confidentiality)
     story.append(PageBreak())
-    
-    # ===== CONTENT =====
-    # Add section separator
-    from reportlab.platypus import HRFlowable
-    story.append(Spacer(1, 0.5*cm))
-    story.append(HRFlowable(width="100%", thickness=1, color=HexColor('#D0D0D0'), 
-                           spaceAfter=20, spaceBefore=0, hAlign='LEFT'))
-    
-    # Table counter for professional table titles
+
+
+# -----------------------------------------------------------------------------
+# PUBLIC GENERATOR
+# -----------------------------------------------------------------------------
+def generate_chat_pdf(
+    messages,
+    output_path="output.pdf",
+    title="Professional Assessment Report",
+    subtitle="Performance Analysis and Evaluation",
+):
+    """Generate a modern professional PDF from assistant messages."""
+    styles = build_styles()
+
+    doc = SimpleDocTemplate(
+        output_path,
+        pagesize=A4,
+        leftMargin=LEFT_MARGIN,
+        rightMargin=RIGHT_MARGIN,
+        topMargin=TOP_MARGIN,
+        bottomMargin=BOTTOM_MARGIN,
+        title=title,
+        author="Professional PDF Generator",
+        subject=subtitle,
+    )
+
+    story = []
+    add_cover_page(story, styles, title, subtitle)
+
     table_counter = 1
-    
-    # Add content from messages (assistant only)
-    for idx, msg in enumerate(messages):
-        role = msg.get('role', 'assistant')
-        content = msg.get('content', '')
-        
-        # Skip non-assistant messages
-        if role != 'assistant':
+    assistant_messages = [m for m in messages if m.get("role", "assistant") == "assistant"]
+
+    for message_index, msg in enumerate(assistant_messages):
+        content = str(msg.get("content", "") or "").strip()
+        if not content:
             continue
-        
-        # Parse content for tables
-        content_elements = parse_content_with_tables(content)
-        
-        for elem_type, elem_data in content_elements:
-            if elem_type == 'table':
-                # Add professional table title
-                table_title = Paragraph(f"Table {table_counter}: Data Overview", table_title_style)
-                story.append(table_title)
+
+        for elem_type, elem_data in parse_content_with_tables(content):
+            if elem_type == "table":
+                story.append(Spacer(1, 0.05 * cm))
+                story.append(
+                    Paragraph(
+                        f"TABLE {table_counter:02d}  |  DATA OVERVIEW",
+                        styles["table_title"],
+                    )
+                )
+                story.append(create_table_from_data(elem_data, styles))
+                story.append(Spacer(1, 0.35 * cm))
                 table_counter += 1
-                
-                # Create and add professional table
-                table = create_table_from_data(elem_data)
-                story.append(table)
-                story.append(Spacer(1, 0.3*cm))
             else:
-                # Regular text content with professional formatting
-                if elem_data.strip():
-                    # Process text chunks and conclusions separately
-                    for chunk_type, chunk_data in clean_text_formatting(elem_data.strip()):
-                        if chunk_type == 'conclusion':
-                            # Create conclusion box as a separate styled table
-                            conclusion_style = ParagraphStyle(
-                                'ConclusionText',
-                                parent=styles['Normal'],
-                                fontSize=11,
-                                textColor=HexColor('#003366'),
-                                alignment=TA_LEFT,
-                                leading=14,
-                                fontName='Helvetica'
-                            )
-                            conclusion_para = Paragraph(f'<b>Conclusion:</b> {chunk_data}', conclusion_style)
-                            
-                            # Create a table for the conclusion box with styling
-                            conclusion_table = Table([[conclusion_para]], colWidths=[17*cm])
-                            conclusion_table.setStyle(TableStyle([
-                                ('BACKGROUND', (0, 0), (-1, -1), HexColor('#E9F3FF')),
-                                ('BOX', (0, 0), (-1, -1), 1, HexColor('#BBD4EE')),
-                                ('TOPPADDING', (0, 0), (-1, -1), 12),
-                                ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-                                ('LEFTPADDING', (0, 0), (-1, -1), 14),
-                                ('RIGHTPADDING', (0, 0), (-1, -1), 14),
-                                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                            ]))
-                            story.append(Spacer(1, 0.2*cm))
-                            story.append(conclusion_table)
-                            story.append(Spacer(1, 0.3*cm))
-                        elif chunk_type == 'text' and chunk_data:
-                            # Regular text paragraph
-                            content_para = Paragraph(chunk_data, report_body_style)
-                            story.append(content_para)
-        
-        # Add spacing between sections if multiple messages
-        if idx < len(messages) - 1:
-            story.append(Spacer(1, 0.4*cm))
-            story.append(HRFlowable(width="100%", thickness=0.5, color=HexColor('#D0D0D0'), 
-                                   spaceAfter=20, spaceBefore=0, hAlign='LEFT'))
-    
-    # Build PDF with custom header/footer
-    doc.build(story, canvasmaker=HeaderFooterCanvas)
+                story.extend(render_text_block(elem_data, styles))
+
+        if message_index < len(assistant_messages) - 1:
+            story.append(Spacer(1, 0.18 * cm))
+            story.append(HRFlowable(width="100%", thickness=0.55, color=BORDER, spaceAfter=9))
+
+    doc.build(story, canvasmaker=ModernReportCanvas)
     return output_path
 
-# CLI interface
+
 if __name__ == "__main__":
-    # Read JSON from stdin or command line argument
     if len(sys.argv) > 1:
         messages_json = sys.argv[1]
     else:
         messages_json = sys.stdin.read()
-    
+
     messages = json.loads(messages_json)
     output_file = "output.pdf"
-    
     generate_chat_pdf(messages, output_file)
     print(f"PDF generated: {output_file}")
-
